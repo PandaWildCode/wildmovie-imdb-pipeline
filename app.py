@@ -28,8 +28,9 @@ st.markdown(
     --trait:  #262D38;
     --texte:  #E9EDF2;
     --gris:   #8D9AAB;
-    --or:     #F5C518;   /* le jaune des notes IMDb */
-    --rouge:  #C8102E;
+    --or:     #F5C518;   /* réservé aux notes, comme sur IMDb */
+    --bleu:   #4E96D9;   /* l'accent de la marque, commun au portfolio */
+    --bleu-2: #9CC6EE;
   }
 
   .stApp { background: var(--nuit); }
@@ -47,12 +48,12 @@ st.markdown(
     margin: 0 0 10px !important;
     color: var(--texte);
   }
-  .cm-titre span { color: var(--or); }
+  .cm-titre span { color: var(--bleu); }
   .cm-baseline {
     color: var(--gris); font-size: 15.5px !important; margin: 0 !important;
     max-width: 68ch; line-height: 1.6 !important;
   }
-  .cm-filet { height: 3px; width: 58px; background: var(--rouge); margin: 20px 0 28px; }
+  .cm-filet { height: 3px; width: 58px; background: var(--bleu); margin: 20px 0 28px; }
 
   /* --- Fiche film --- */
   .cm-fiche {
@@ -68,7 +69,7 @@ st.markdown(
     border: 1px solid var(--trait); color: var(--gris); white-space: nowrap;
   }
   .cm-puce.note { border-color: var(--or); color: var(--or); font-weight: 700; }
-  .cm-puce.sim  { border-color: var(--rouge); color: #FF8095; font-weight: 700; }
+  .cm-puce.sim  { border-color: var(--bleu); color: var(--bleu-2); font-weight: 700; }
 
   .cm-genres { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 13px; }
   .cm-genre {
