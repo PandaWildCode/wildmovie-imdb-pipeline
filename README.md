@@ -5,8 +5,30 @@
 ![Python](https://img.shields.io/badge/Python-3.10-3776AB?style=flat-square&logo=python&logoColor=white)
 ![Pandas](https://img.shields.io/badge/Pandas-150458?style=flat-square&logo=pandas&logoColor=white)
 ![NumPy](https://img.shields.io/badge/NumPy-013243?style=flat-square&logo=numpy&logoColor=white)
-![scikit-learn](https://img.shields.io/badge/scikit--learn-F7931E?style=flat-square&logo=scikitlearn&logoColor=white)
+![SciPy](https://img.shields.io/badge/SciPy-8CAAE6?style=flat-square&logo=scipy&logoColor=white)
+![Streamlit](https://img.shields.io/badge/Streamlit-FF4B4B?style=flat-square&logo=streamlit&logoColor=white)
 ![Jupyter](https://img.shields.io/badge/Jupyter-F37626?style=flat-square&logo=jupyter&logoColor=white)
+
+---
+
+## 🎬 Application de démonstration
+
+**➡️ [Ouvrir WildMovie](LIEN_STREAMLIT)**
+
+Trois onglets :
+
+| Onglet | Ce qu'il montre |
+|---|---|
+| **Recommandations** | On saisit un film aimé, l'application renvoie les plus proches avec un score de correspondance et la raison de chaque suggestion (« en commun : Christopher Nolan, Hans Zimmer ») |
+| **Explorer le catalogue** | Filtrage des 66 742 films par note, popularité et par personne — acteur, réalisateur ou compositeur |
+| **Le projet** | Les chiffres du pipeline, la distribution des notes, l'arbitrage IMDb / TMDB et les limites assumées |
+
+Pour la lancer en local :
+
+```bash
+pip install -r requirements.txt
+streamlit run app.py
+```
 
 ---
 
@@ -93,23 +115,61 @@ L'ensemble de la chaîne (sources → zones de préparation → tables dimension
 - Arbitrage de notation explicite entre IMDb et TMDB (colonne `SOURCE_TO_KEEP`) plutôt qu'un choix implicite : la source retenue est traçable pour chaque film.
 - Pipeline reproductible : un notebook « version en ligne » rejoue la chaîne complète du fichier brut à l'export.
 
+## Limites assumées
+
+- **Pas de genre ni d'année de sortie.** La table `title.basics` d'IMDb n'a pas été conservée dans les exports du projet : la recommandation repose donc sur les génériques seuls. Les ajouter améliorerait nettement la diversité des suggestions — c'est la première évolution à faire.
+- **Pas d'affiches.** Le chemin vers les visuels TMDB n'a pas été récupéré ; les vignettes de l'application sont des aplats générés à partir de l'identifiant du film.
+- **Un film sans générique connu (28 sur 66 742) ne reçoit aucune recommandation.** L'application le dit explicitement plutôt que d'inventer une liste.
+
+## Le moteur de recommandation
+
+Le score qui classe les suggestions se lit en une phrase :
+
+```
+score = (1 − p) × similarité de générique  +  p × note lissée normalisée
+```
+
+**La similarité de générique.** Chaque film devient un vecteur creux sur l'ensemble des personnes du catalogue — 220 934 dimensions, pondérées par rôle : réalisateur ×3, compositeur ×1,6, acteur principal ×1. Le réalisateur pèse le plus parce que c'est lui qui porte l'univers d'un film. Les vecteurs sont normalisés en L2, ce qui rend comparables un film à trois intervenants connus et un film au générique fourni ; la proximité est alors une similarité cosinus, calculée par un simple produit matriciel creux — **moins de 10 ms sur 66 742 films**.
+
+**La note lissée.** Une moyenne bayésienne, pour qu'un 9/10 sur 600 votes ne passe pas devant un 9/10 sur 600 000 :
+
+```
+note_lissée = (votes × note + 5000 × moyenne_catalogue) / (votes + 5000)
+```
+
+**Le curseur `p`** laisse l'utilisateur arbitrer entre proximité pure et notoriété. À 0, seul le générique compte.
+
+Un film sans aucun intervenant en commun est écarté plutôt que classé bas : mieux vaut ne rien proposer qu'une suggestion sans rapport.
+
 ## Stack
 
-`Python` · `Pandas` · `NumPy` · `Jupyter / Anaconda` · `scikit-learn` · `Streamlit` · `Git`
+`Python` · `Pandas` · `NumPy` · `SciPy (matrices creuses)` · `Streamlit` · `Jupyter / Anaconda` · `Git`
 
 ## Structure du dépôt
 
 ```
+├── app.py                 # l'application Streamlit (interface, 3 onglets)
+├── moteur.py              # la logique de recommandation, testable sans Streamlit
+├── films.csv.gz           # catalogue allégé : 66 742 films, 10 Mo
+├── requirements.txt
+├── .streamlit/
+│   └── config.toml        # thème de l'application
 ├── notebooks/
 │   ├── 01_name_basics_exploration.ipynb   # exploration et nettoyage pas à pas
 │   ├── 02_name_basics_pipeline.ipynb      # version consolidée, rejouable
 │   └── 03_dim_person_list.ipynb           # explode + construction de la dimension
 ├── src/
 │   └── dim_person_list.py                 # script de production de DIM_PERSON_LIST
-├── docs/
-│   └── pipeline_v1.5.png                  # schéma de flux du pipeline
 └── README.md
 ```
+
+### Le catalogue embarqué
+
+`films.csv.gz` est un extrait volontairement réduit des tables du pipeline, pour que l'application tienne dans un dépôt Git et démarre en une seconde :
+
+- seuls les films réunissant **au moins 500 votes IMDb** — en dessous, la note n'est pas fiable et la recommandation devient du bruit ;
+- **8 acteurs, 3 réalisateurs et 2 compositeurs** au maximum par film ;
+- titre français quand il existe, titre original sinon.
 
 > ⚠️ Les fichiers sources IMDb ne sont pas versionnés (plusieurs centaines de Mo). Ils se téléchargent sur [datasets.imdbws.com](https://datasets.imdbws.com/).
 
