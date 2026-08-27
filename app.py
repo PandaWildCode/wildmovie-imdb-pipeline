@@ -36,13 +36,23 @@ st.markdown(
   .block-container { padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1180px; }
   html, body, [class*="css"] { color: var(--texte); }
 
-  /* --- En-tête --- */
+  /* --- En-tête ---
+     Streamlit applique ses propres règles aux paragraphes du markdown ;
+     il faut donc forcer la taille du titre pour qu'elle tienne. */
   .cm-titre {
-    font-size: 40px; font-weight: 800; letter-spacing: -0.025em; margin: 0;
+    font-size: clamp(30px, 4.5vw, 44px) !important;
+    font-weight: 800 !important;
+    line-height: 1.05 !important;
+    letter-spacing: -0.025em;
+    margin: 0 0 10px !important;
+    color: var(--texte);
   }
   .cm-titre span { color: var(--or); }
-  .cm-baseline { color: var(--gris); font-size: 15px; margin: 8px 0 0; max-width: 62ch; line-height: 1.55; }
-  .cm-filet { height: 3px; width: 58px; background: var(--rouge); margin: 18px 0 26px; }
+  .cm-baseline {
+    color: var(--gris); font-size: 15.5px !important; margin: 0 !important;
+    max-width: 68ch; line-height: 1.6 !important;
+  }
+  .cm-filet { height: 3px; width: 58px; background: var(--rouge); margin: 20px 0 28px; }
 
   /* --- Fiche film --- */
   .cm-fiche {

@@ -10,7 +10,7 @@
 
 ---
 
-## ➡️ [Ouvrir CinéMad](LIEN_STREAMLIT)
+## ➡️ [Ouvrir CinéMad](https://pandawildmovie.streamlit.app/)
 
 Quatre modes de recherche — par **film**, **acteur**, **réalisateur** ou **compositeur** — et quatre tris : pertinence, plus récents, mieux notés, plus populaires.
 
@@ -131,6 +131,7 @@ Un second garde-fou complète la correction : les films réunissant moins de 1 0
 
 - **Les titres français viennent de `title.akas` sans distinction de région.** France et Québec s'y mélangent : *The Shawshank Redemption* s'affiche « À l'ombre de Shawshank » plutôt que « Les Évadés ». La recherche accepte les deux ; seul l'affichage est concerné.
 - **8 % des films n'ont pas d'affiche** dans le jeu TMDB — l'interface l'indique explicitement plutôt que d'afficher un cadre vide.
+- **Les résumés sont en anglais**, tels que TMDB les fournit. Les traduire coûterait un appel d'API par film, soit 202 643 appels — hors de portée ici, et sans effet sur la qualité des recommandations puisque la comparaison se fait entre résumés d'une même langue.
 - **Aucune personnalisation.** Le moteur ne connaît que les films, jamais les spectateurs. C'est la contrainte du *cold start*, pas un choix.
 
 ---
