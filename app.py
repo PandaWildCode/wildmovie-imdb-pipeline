@@ -1,58 +1,18 @@
 """
-WildMovie — moteur de recommandation de films pour un cinéma indépendant.
+CinéMad — l'assistant de programmation du cinéma de la Creuse.
 
 Projet 2 du titre professionnel Data Analyst (RNCP 37429), Wild Code School.
-Données : IMDb (notes, votes, génériques) et TMDB (notes complémentaires).
+Données : IMDb (types, titres, génériques, notes) et TMDB (résumés, affiches).
 
 Lancer en local :   streamlit run app.py
 """
 
-import hashlib
-import os
-
-import numpy as np
 import pandas as pd
 import streamlit as st
 
 import moteur
 
-# Le fichier est à la racine du dépôt (contrainte de déploiement Streamlit Cloud),
-# mais on accepte aussi data/ pour un usage local rangé.
-RACINE = os.path.dirname(os.path.abspath(__file__))
-CHEMIN_DONNEES = next(
-    chemin
-    for chemin in (
-        os.path.join(RACINE, "films.csv.gz"),
-        os.path.join(RACINE, "data", "films.csv.gz"),
-    )
-    if os.path.exists(chemin)
-)
-
-st.set_page_config(
-    page_title="WildMovie",
-    page_icon="🎬",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
-
-# --------------------------------------------------------------------------- #
-#  Chargement
-# --------------------------------------------------------------------------- #
-
-@st.cache_data(show_spinner="Chargement du catalogue…")
-def charger():
-    return moteur.charger_films(CHEMIN_DONNEES)
-
-
-@st.cache_resource(show_spinner="Construction du modèle de similarité…")
-def modele(nb_lignes: int):
-    # nb_lignes ne sert qu'à invalider le cache si le catalogue change.
-    return moteur.construire_matrice(charger())
-
-
-films = charger()
-matrice, vocabulaire = modele(len(films))
+st.set_page_config(page_title="CinéMad", page_icon="🎬", layout="wide")
 
 
 # --------------------------------------------------------------------------- #
@@ -63,104 +23,70 @@ st.markdown(
     """
 <style>
   :root {
-    --nuit:    #0E1116;
-    --carte:   #171C24;
-    --carte-2: #1F2632;
-    --trait:   #2A3341;
-    --texte:   #ECEFF3;
-    --gris:    #93A0B1;
-    --or:      #F2B705;
-    --or-fonce:#8A6A05;
+    --nuit:   #0D1014;
+    --carte:  #161B22;
+    --trait:  #262D38;
+    --texte:  #E9EDF2;
+    --gris:   #8D9AAB;
+    --or:     #F5C518;   /* le jaune des notes IMDb */
+    --rouge:  #C8102E;
   }
 
   .stApp { background: var(--nuit); }
-  .block-container { padding-top: 2rem; max-width: 1280px; }
+  .block-container { padding-top: 2.2rem; padding-bottom: 3rem; max-width: 1180px; }
   html, body, [class*="css"] { color: var(--texte); }
 
   /* --- En-tête --- */
-  .wm-header { display: flex; align-items: baseline; gap: 16px; margin-bottom: 4px; }
-  .wm-logo {
-    font-size: 34px; font-weight: 800; letter-spacing: -0.02em;
-    color: var(--texte); margin: 0;
+  .cm-titre {
+    font-size: 40px; font-weight: 800; letter-spacing: -0.025em; margin: 0;
   }
-  .wm-logo span { color: var(--or); }
-  .wm-baseline { color: var(--gris); font-size: 14px; }
-  .wm-rule { height: 3px; width: 64px; background: var(--or); margin: 14px 0 22px; }
+  .cm-titre span { color: var(--or); }
+  .cm-baseline { color: var(--gris); font-size: 15px; margin: 8px 0 0; max-width: 62ch; line-height: 1.55; }
+  .cm-filet { height: 3px; width: 58px; background: var(--rouge); margin: 18px 0 26px; }
 
-  /* --- Fiche du film sélectionné --- */
-  .wm-fiche {
-    display: flex; gap: 26px; background: var(--carte);
-    border: 1px solid var(--trait); border-radius: 10px; padding: 22px; margin-bottom: 10px;
-  }
-  .wm-affiche {
-    width: 132px; min-width: 132px; height: 196px; border-radius: 8px;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 46px; font-weight: 800; color: rgba(255,255,255,.82);
-  }
-  .wm-fiche h2 { margin: 0 0 2px; font-size: 27px; line-height: 1.2; }
-  .wm-vo { color: var(--gris); font-size: 14px; font-style: italic; margin-bottom: 14px; }
-  .wm-ligne { margin: 7px 0; font-size: 14.5px; }
-  .wm-ligne b { color: var(--gris); font-weight: 500; margin-right: 7px; }
-
-  .wm-notes { display: flex; gap: 26px; margin: 16px 0 4px; }
-  .wm-note-bloc { text-align: left; }
-  .wm-note-val { font-size: 25px; font-weight: 800; line-height: 1; }
-  .wm-note-src { font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase; color: var(--gris); margin-top: 5px; }
-  .wm-or { color: var(--or); }
-
-  /* --- Cartes de recommandation --- */
-  .wm-carte {
+  /* --- Fiche film --- */
+  .cm-fiche {
     background: var(--carte); border: 1px solid var(--trait); border-radius: 10px;
-    overflow: hidden; height: 100%; display: flex; flex-direction: column;
+    padding: 18px 20px; height: 100%;
   }
-  .wm-vignette {
-    height: 108px; display: flex; align-items: center; justify-content: center;
-    font-size: 34px; font-weight: 800; color: rgba(255,255,255,.8);
+  .cm-fiche h3 { margin: 0 0 3px; font-size: 21px; line-height: 1.25; font-weight: 700; }
+  .cm-vo { color: var(--gris); font-size: 13px; font-style: italic; margin-bottom: 12px; }
+
+  .cm-chiffres { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+  .cm-puce {
+    font-size: 12px; padding: 3px 9px; border-radius: 999px;
+    border: 1px solid var(--trait); color: var(--gris); white-space: nowrap;
   }
-  .wm-corps { padding: 13px 15px 16px; display: flex; flex-direction: column; gap: 7px; flex: 1; }
-  .wm-titre { font-size: 15px; font-weight: 700; line-height: 1.28; }
-  .wm-meta  { font-size: 12.5px; color: var(--gris); line-height: 1.4; }
-  .wm-commun { font-size: 12px; color: var(--or); line-height: 1.4; }
+  .cm-puce.note { border-color: var(--or); color: var(--or); font-weight: 700; }
+  .cm-puce.sim  { border-color: var(--rouge); color: #FF8095; font-weight: 700; }
 
-  .wm-barre { height: 5px; background: var(--carte-2); border-radius: 3px; overflow: hidden; margin-top: auto; }
-  .wm-barre > div { height: 100%; background: linear-gradient(90deg, var(--or-fonce), var(--or)); }
-  .wm-score { font-size: 11px; letter-spacing: .07em; text-transform: uppercase; color: var(--gris); }
+  .cm-genres { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 13px; }
+  .cm-genre {
+    font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+    padding: 3px 8px; border-radius: 4px; background: #1E2530; color: var(--gris);
+  }
 
-  /* --- Divers --- */
-  .wm-section { font-size: 19px; font-weight: 700; margin: 26px 0 14px; }
-  .wm-note-bas { color: var(--gris); font-size: 13px; line-height: 1.6; }
-  .stTabs [data-baseweb="tab-list"] { gap: 4px; border-bottom: 1px solid var(--trait); }
-  .stTabs [data-baseweb="tab"] { color: var(--gris); }
-  .stTabs [aria-selected="true"] { color: var(--or); }
+  .cm-equipe { font-size: 13.5px; line-height: 1.75; }
+  .cm-equipe b { color: var(--gris); font-weight: 500; }
+  .cm-resume { font-size: 13.5px; color: var(--gris); line-height: 1.6; margin-top: 12px; }
+
+  .cm-sans-affiche {
+    background: #1A212B; border: 1px dashed var(--trait); border-radius: 8px;
+    height: 100%; min-height: 210px; display: flex; align-items: center;
+    justify-content: center; color: var(--gris); font-size: 12px; text-align: center;
+  }
+
+  .cm-pied {
+    color: var(--gris); font-size: 12.5px; line-height: 1.65;
+    border-top: 1px solid var(--trait); padding-top: 18px; margin-top: 34px;
+  }
+
+  .stRadio [role="radiogroup"] { gap: 18px; }
+  div[data-testid="stImage"] img { border-radius: 8px; }
 </style>
 """,
     unsafe_allow_html=True,
 )
-
-
-def couleurs(identifiant: str) -> tuple[str, str]:
-    """Deux teintes stables déduites de l'identifiant du film."""
-    graine = int(hashlib.md5(str(identifiant).encode()).hexdigest()[:8], 16)
-    teinte = graine % 360
-    return (
-        f"hsl({teinte}, 42%, 26%)",
-        f"hsl({(teinte + 38) % 360}, 46%, 15%)",
-    )
-
-
-def initiale(titre: str) -> str:
-    for caractere in str(titre):
-        if caractere.isalnum():
-            return caractere.upper()
-    return "?"
-
-
-def liste(valeur: str, separateur: str = ", ") -> str:
-    return separateur.join([x for x in str(valeur).split("|") if x]) or "—"
-
-
-def entier(n) -> str:
-    return f"{int(n):,}".replace(",", " ")
 
 
 # --------------------------------------------------------------------------- #
@@ -169,325 +95,257 @@ def entier(n) -> str:
 
 st.markdown(
     """
-<div class="wm-header">
-  <p class="wm-logo">Wild<span>Movie</span></p>
-  <span class="wm-baseline">Le moteur de recommandation du cinéma de la Creuse</span>
-</div>
-<div class="wm-rule"></div>
+<p class="cm-titre">🎬 Ciné<span>Mad</span></p>
+<p class="cm-baseline">
+  Bienvenue dans les salles de cinéma de la Creuse. CinéMad cherche les films
+  qui correspondent à vos envies du moment — par titre, par acteur, par
+  réalisateur ou par compositeur.
+</p>
+<div class="cm-filet"></div>
 """,
     unsafe_allow_html=True,
 )
 
-onglet_reco, onglet_catalogue, onglet_projet = st.tabs(
-    ["  Recommandations  ", "  Explorer le catalogue  ", "  Le projet  "]
-)
-
 
 # --------------------------------------------------------------------------- #
-#  Onglet 1 — Recommandations
+#  Formulaire
 # --------------------------------------------------------------------------- #
 
-with onglet_reco:
-    colonne_recherche, colonne_reglages = st.columns([3, 2])
+COLONNE_PAR_MODE = {
+    "Acteur": "ACTOR_NAME",
+    "Réalisateur": "DIRECTOR_NAME",
+    "Compositeur": "COMPOSER_NAME",
+}
 
-    with colonne_recherche:
+TRIS = {
+    "Pertinence": "similar",
+    "Plus récents": "recent",
+    "Mieux notés": "rating",
+    "Plus populaires": "votes",
+}
+
+POPULARITE = {
+    "Aucune": 0,
+    "Au moins 1 000 votes": 1_000,
+    "Au moins 10 000 votes": 10_000,
+    "Au moins 100 000 votes": 100_000,
+}
+
+with st.form("recherche"):
+    mode = st.radio(
+        "Mode de recherche",
+        ["Film", "Acteur", "Réalisateur", "Compositeur"],
+        horizontal=True,
+    )
+
+    col_requete, col_tri, col_pop, col_nb = st.columns([3, 1.3, 1.4, 0.9])
+
+    with col_requete:
         requete = st.text_input(
-            "Un film que vous avez aimé",
-            value="Inception",
-            placeholder="Tapez un titre, en français ou en version originale…",
+            "Votre recherche",
+            placeholder="Inception · Leonardo DiCaprio · Christopher Nolan · Hans Zimmer",
         )
-
-    resultats = moteur.chercher(films, requete)
-
-    if resultats.empty:
-        st.info(
-            "Aucun titre ne correspond. Essayez un extrait plus court, "
-            "ou le titre en version originale."
-        )
-        st.stop()
-
-    with colonne_recherche:
-        etiquettes = {
-            int(idx): f"{ligne.TITRE}  ·  {ligne.REALISATEURS.split('|')[0] or 'réalisateur inconnu'}"
-            for idx, ligne in resultats.iterrows()
-        }
-        index_film = st.selectbox(
-            f"{len(resultats)} film(s) trouvé(s)",
-            options=list(etiquettes.keys()),
-            format_func=lambda k: etiquettes[k],
-        )
-
-    with colonne_reglages:
-        nb_reco = st.slider("Nombre de recommandations", 3, 18, 9, step=3)
-        poids = st.slider(
-            "Part de la notoriété dans le score",
-            0.0, 0.6, 0.25, step=0.05,
+    with col_tri:
+        libelle_tri = st.selectbox("Trier les résultats", list(TRIS.keys()), index=0)
+    with col_pop:
+        libelle_pop = st.selectbox(
+            "Notoriété minimale",
+            list(POPULARITE.keys()),
+            index=1,
             help=(
-                "À 0, seule la proximité de générique compte. "
-                "En montant, les films très bien notés remontent."
+                "Écarte les films que presque personne n'a notés. Leur fiche est "
+                "si pauvre qu'ils se retrouvent proches de n'importe quel film."
             ),
         )
-        votes_min = st.select_slider(
-            "Popularité minimale (votes IMDb)",
-            options=[500, 1000, 5000, 25000, 100000],
-            value=1000,
-        )
+    with col_nb:
+        nb = st.selectbox("Résultats", [5, 10, 15, 20], index=0)
 
-    film = films.loc[index_film]
-    haut, bas = couleurs(film.ID_FILM)
-
-    note_imdb = "—" if pd.isna(film.NOTE_MOYENNE_IMDB) else f"{film.NOTE_MOYENNE_IMDB:.1f}"
-    note_tmdb = "—" if pd.isna(film.NOTE_MOYENNE_TMDB) else f"{film.NOTE_MOYENNE_TMDB:.1f}"
-    vo = (
-        f'<div class="wm-vo">Titre original : {film.TITRE_VO}</div>'
-        if film.TITRE_VO and film.TITRE_VO != film.TITRE
-        else ""
-    )
-
-    st.markdown(
-        f"""
-<div class="wm-fiche">
-  <div class="wm-affiche" style="background: linear-gradient(160deg, {haut}, {bas});">
-    {initiale(film.TITRE)}
-  </div>
-  <div style="flex:1; min-width:0;">
-    <h2>{film.TITRE}</h2>
-    {vo}
-    <div class="wm-notes">
-      <div class="wm-note-bloc">
-        <div class="wm-note-val wm-or">{note_imdb}</div>
-        <div class="wm-note-src">IMDb · {entier(film.NOMBRE_DE_VOTES_IMDB)} votes</div>
-      </div>
-      <div class="wm-note-bloc">
-        <div class="wm-note-val">{note_tmdb}</div>
-        <div class="wm-note-src">TMDB · {entier(film.NOMBRE_DE_VOTES_TMDB)} votes</div>
-      </div>
-      <div class="wm-note-bloc">
-        <div class="wm-note-val">{film.NOTE_BAYES:.2f}</div>
-        <div class="wm-note-src">Note lissée</div>
-      </div>
-    </div>
-    <div class="wm-ligne"><b>Réalisation</b>{liste(film.REALISATEURS)}</div>
-    <div class="wm-ligne"><b>Avec</b>{liste(film.ACTEURS)}</div>
-    <div class="wm-ligne"><b>Musique</b>{liste(film.COMPOSITEURS)}</div>
-    <div class="wm-ligne"><b>Source de note retenue</b>{film.SOURCE_TO_KEEP}</div>
-  </div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    reco = moteur.recommander(
-        films, matrice, index_film, nb=nb_reco, poids_notoriete=poids, votes_min=votes_min
-    )
-
-    st.markdown('<div class="wm-section">Vous aimerez sans doute</div>', unsafe_allow_html=True)
-
-    if reco.empty:
-        st.warning(
-            "Aucun film ne partage d'intervenant avec celui-ci au niveau de popularité "
-            "demandé. Baissez le seuil de votes."
-        )
-    else:
-        positions = {identifiant: i for i, identifiant in enumerate(films.ID_FILM)}
-        lignes = [reco.iloc[i : i + 3] for i in range(0, len(reco), 3)]
-
-        for groupe in lignes:
-            colonnes = st.columns(3)
-            for colonne, (_, r) in zip(colonnes, groupe.iterrows()):
-                j = positions[r.ID_FILM]
-                communs = moteur.intervenants_communs(films, index_film, j)[:3]
-                h, b = couleurs(r.ID_FILM)
-                note = "—" if pd.isna(r.MEILLEURE_NOTE) else f"{r.MEILLEURE_NOTE:.1f}"
-                realisation = r.REALISATEURS.split("|")[0] or "Réalisateur inconnu"
-
-                with colonne:
-                    st.markdown(
-                        f"""
-<div class="wm-carte">
-  <div class="wm-vignette" style="background: linear-gradient(160deg, {h}, {b});">
-    {initiale(r.TITRE)}
-  </div>
-  <div class="wm-corps">
-    <div class="wm-titre">{r.TITRE}</div>
-    <div class="wm-meta">{realisation}<br>
-      <span class="wm-or">★ {note}</span> · {entier(r.NOMBRE_DE_VOTES_IMDB)} votes</div>
-    <div class="wm-commun">En commun : {', '.join(communs) if communs else '—'}</div>
-    <div class="wm-score">Correspondance {r.SCORE:.0f} %</div>
-    <div class="wm-barre"><div style="width:{max(0, min(100, r.SCORE)):.0f}%"></div></div>
-  </div>
-</div>
-""",
-                        unsafe_allow_html=True,
-                    )
-            st.write("")
-
-    st.markdown(
-        """
-<div class="wm-note-bas">
-  <b>Comment le score est calculé.</b> Aucun client n'a renseigné ses préférences :
-  c'est une situation de <i>cold start</i>. La recommandation ne peut donc pas s'appuyer
-  sur des historiques de visionnage, seulement sur ce que les films ont en commun.
-  Chaque film est représenté par les personnes qui l'ont fait — réalisateurs (poids 3),
-  compositeurs (1,6), acteurs principaux (1). Deux films sont proches quand ces vecteurs
-  pointent dans la même direction (similarité cosinus). La note lissée ajoute un bonus
-  de qualité, dosable avec le curseur.
-</div>
-""",
-        unsafe_allow_html=True,
-    )
+    lance = st.form_submit_button("Rechercher", type="primary")
 
 
 # --------------------------------------------------------------------------- #
-#  Onglet 2 — Catalogue
+#  Affichage d'un film
 # --------------------------------------------------------------------------- #
 
-with onglet_catalogue:
-    filtre_1, filtre_2, filtre_3 = st.columns([2, 1, 1])
+def raccourcir(texte, longueur=300):
+    texte = "" if pd.isna(texte) else str(texte).replace("\n", " ").strip()
+    if len(texte) <= longueur:
+        return texte
+    return texte[:longueur].rsplit(" ", 1)[0] + "…"
 
-    with filtre_1:
-        personne = st.text_input(
-            "Filtrer par personne (acteur, réalisateur, compositeur)",
-            placeholder="Ex. : Jean Dujardin, Agnès Varda…",
+
+def accorde(noms: str, singulier: str, pluriel: str) -> str:
+    liste = [n for n in str(noms).split("|") if n]
+    if not liste:
+        return ""
+    etiquette = pluriel if len(liste) > 1 else singulier
+    return f"<b>{etiquette} :</b> {raccourcir(', '.join(liste), 110)}<br>"
+
+
+def afficher_film(film):
+    col_affiche, col_infos = st.columns([1, 3.4], gap="medium")
+
+    with col_affiche:
+        url = moteur.url_affiche(film.get("POSTER_PATH", ""))
+        if url:
+            st.image(url, use_container_width=True)
+        else:
+            st.markdown(
+                '<div class="cm-sans-affiche">🎞️<br>Pas d\'affiche</div>',
+                unsafe_allow_html=True,
+            )
+
+    with col_infos:
+        titre = film.get("TITRE_AFFICHE") or film.get("TITLE_ORIGINAL") or "Titre inconnu"
+        original = film.get("TITLE_ORIGINAL", "")
+        vo = (
+            f'<div class="cm-vo">Titre original : {original}</div>'
+            if original and original != titre
+            else ""
         )
-    with filtre_2:
-        note_min = st.slider("Note minimale", 0.0, 10.0, 7.0, step=0.5)
-    with filtre_3:
-        popularite_min = st.select_slider(
-            "Votes minimum", options=[500, 1000, 5000, 25000, 100000, 500000], value=5000
+
+        annee = int(film["YEAR_NUM"]) if film.get("YEAR_NUM") else None
+        entete = f"{titre} ({annee})" if annee else titre
+
+        puces = []
+        note = film.get("BEST_RATING") or 0
+        if note:
+            puces.append(f'<span class="cm-puce note">★ {float(note):.1f}</span>')
+        votes = int(film.get("TOTAL_VOTES") or 0)
+        if votes:
+            puces.append(f'<span class="cm-puce">{votes:,} votes</span>'.replace(",", " "))
+        duree = film.get("DURATION_MINUTES")
+        if pd.notna(duree) and duree:
+            puces.append(f'<span class="cm-puce">{int(duree)} min</span>')
+        if "SIM" in film and pd.notna(film["SIM"]):
+            puces.append(
+                f'<span class="cm-puce sim">Correspondance {float(film["SIM"]) * 100:.0f} %</span>'
+            )
+        source = film.get("SOURCE_TO_KEEP")
+        if isinstance(source, str) and source:
+            puces.append(f'<span class="cm-puce">note {source}</span>')
+
+        genres = "".join(
+            f'<span class="cm-genre">{g}</span>'
+            for g in str(film.get("GENRES", "")).split("|")
+            if g
         )
 
-    vue = films[
-        (films.MEILLEURE_NOTE.fillna(0) >= note_min)
-        & (films.NOMBRE_DE_VOTES_IMDB >= popularite_min)
-    ]
-
-    if personne.strip():
-        cible = personne.strip().lower()
         equipe = (
-            vue.ACTEURS.str.lower()
-            + "|"
-            + vue.REALISATEURS.str.lower()
-            + "|"
-            + vue.COMPOSITEURS.str.lower()
-        )
-        vue = vue[equipe.str.contains(cible, regex=False, na=False)]
-
-    st.caption(f"{entier(len(vue))} films correspondent — les 200 mieux notés sont affichés.")
-
-    affichage = (
-        vue.sort_values("NOTE_BAYES", ascending=False)
-        .head(200)[
-            [
-                "TITRE",
-                "REALISATEURS",
-                "ACTEURS",
-                "MEILLEURE_NOTE",
-                "NOMBRE_DE_VOTES_IMDB",
-                "SOURCE_TO_KEEP",
-            ]
-        ]
-        .rename(
-            columns={
-                "TITRE": "Titre",
-                "REALISATEURS": "Réalisation",
-                "ACTEURS": "Distribution",
-                "MEILLEURE_NOTE": "Note",
-                "NOMBRE_DE_VOTES_IMDB": "Votes IMDb",
-                "SOURCE_TO_KEEP": "Source",
-            }
-        )
-    )
-    for colonne in ("Réalisation", "Distribution"):
-        affichage[colonne] = affichage[colonne].str.replace("|", ", ", regex=False)
-
-    st.dataframe(affichage, use_container_width=True, hide_index=True, height=520)
-
-
-# --------------------------------------------------------------------------- #
-#  Onglet 3 — Le projet
-# --------------------------------------------------------------------------- #
-
-with onglet_projet:
-    st.markdown(
-        """
-Un cinéma indépendant de la Creuse veut proposer un service en ligne à ses
-spectateurs. Il n'a **aucun historique de préférences** — la recommandation doit
-donc reposer entièrement sur les caractéristiques des films. La matière première :
-les bases publiques IMDb et TMDB.
-"""
-    )
-
-    st.markdown('<div class="wm-section">Du référentiel brut au catalogue</div>', unsafe_allow_html=True)
-
-    k1, k2, k3, k4 = st.columns(4)
-    k1.metric("Films candidats en entrée", "682 989")
-    k2.metric("Films notés retenus", "202 936")
-    k3.metric("Associations film–personne", "202 278")
-    k4.metric("Catalogue de l'application", entier(len(films)))
-
-    st.caption(
-        "Le catalogue de cette application est volontairement restreint aux films "
-        "réunissant au moins 500 votes IMDb : en dessous, la note n'est pas fiable "
-        "et la recommandation devient du bruit."
-    )
-
-    st.markdown('<div class="wm-section">Ce que contient le catalogue</div>', unsafe_allow_html=True)
-
-    gauche, droite = st.columns(2)
-
-    with gauche:
-        st.markdown("**Distribution des notes**")
-        tranches = pd.cut(
-            films.MEILLEURE_NOTE.dropna(),
-            bins=[0, 4, 5, 6, 7, 8, 9, 10],
-            labels=["<4", "4–5", "5–6", "6–7", "7–8", "8–9", "9–10"],
-        )
-        st.bar_chart(tranches.value_counts().sort_index(), color="#F2B705")
-
-    with droite:
-        st.markdown("**Source de note retenue**")
-        st.bar_chart(films.SOURCE_TO_KEEP.value_counts(), color="#F2B705")
-        st.caption(
-            "Pour chaque film, la source la mieux dotée en votes a été retenue, et "
-            "l'arbitrage est tracé dans la colonne `SOURCE_TO_KEEP` — plutôt qu'un "
-            "choix implicite au moment de la jointure."
+            accorde(film.get("DIRECTOR_NAME", ""), "Réalisateur", "Réalisateurs")
+            + accorde(film.get("ACTOR_NAME", ""), "Acteur", "Acteurs")
+            + accorde(film.get("COMPOSER_NAME", ""), "Compositeur", "Compositeurs")
         )
 
-    st.markdown('<div class="wm-section">Les personnes les plus présentes</div>', unsafe_allow_html=True)
+        resume = raccourcir(film.get("SUMMARY", ""), 300)
+        bloc_resume = (
+            f'<div class="cm-resume">{resume}</div>'
+            if resume
+            else '<div class="cm-resume">Pas de résumé disponible.</div>'
+        )
 
-    onglet_r, onglet_a, onglet_c = st.tabs(["Réalisateurs", "Acteurs", "Compositeurs"])
-    for onglet, colonne in (
-        (onglet_r, "REALISATEURS"),
-        (onglet_a, "ACTEURS"),
-        (onglet_c, "COMPOSITEURS"),
-    ):
-        with onglet:
-            eclate = films[colonne].str.split("|").explode().dropna()
-            comptes = eclate[eclate != ""].value_counts().head(15)
-            st.bar_chart(comptes, color="#F2B705")
-
-    st.markdown('<div class="wm-section">Limites assumées</div>', unsafe_allow_html=True)
-    st.markdown(
-        """
-- **Pas de genre ni d'année de sortie.** La table `title.basics` d'IMDb n'a pas été
-  conservée dans les exports du projet : la recommandation repose donc sur les
-  génériques seuls. Ajouter les genres améliorerait nettement la diversité des
-  suggestions.
-- **Pas d'affiches.** Le chemin vers les visuels TMDB n'a pas été récupéré ;
-  les vignettes sont des aplats générés à partir de l'identifiant du film.
-- **Huit acteurs par film au maximum**, pour garder le fichier de données sous
-  les limites de versionnement de GitHub.
-"""
-    )
-
-    st.markdown(
-        """
-<div class="wm-note-bas" style="margin-top:22px">
-  Projet 2 du titre professionnel Data Analyst (RNCP 37429) — Wild Code School.<br>
-  Données : IMDb et TMDB. Travail d'équipe ; la chaîne de préparation des données
-  présentée ici est ma contribution.
+        st.markdown(
+            f"""
+<div class="cm-fiche">
+  <h3>{entete}</h3>
+  {vo}
+  <div class="cm-chiffres">{"".join(puces)}</div>
+  <div class="cm-genres">{genres}</div>
+  <div class="cm-equipe">{equipe}</div>
+  {bloc_resume}
 </div>
 """,
-        unsafe_allow_html=True,
+            unsafe_allow_html=True,
+        )
+
+    st.write("")
+
+
+# --------------------------------------------------------------------------- #
+#  Recherche
+# --------------------------------------------------------------------------- #
+
+if lance:
+    texte = requete.strip()
+    if not texte:
+        st.warning("Entrez un titre ou un nom pour lancer la recherche.")
+        st.stop()
+
+    tri = TRIS[libelle_tri]
+    votes_min = POPULARITE[libelle_pop]
+
+    try:
+        with st.spinner("Recherche en cours…"):
+            if mode == "Film":
+                try:
+                    resultats = moteur.recommander_par_titre(
+                        texte, n=nb, tri=tri, votes_min=votes_min
+                    )
+                    entete = f"{len(resultats)} films proches de « {texte} »"
+                    aide = (
+                        "Classés par proximité de contenu : résumé, genres, équipe, "
+                        "année et durée."
+                    )
+                except ValueError:
+                    resultats = moteur.chercher_saga(texte, n=nb)
+                    entete = f"{len(resultats)} films dont le titre contient « {texte} »"
+                    aide = (
+                        "Aucun film ne porte exactement ce titre — voici une recherche "
+                        "par titre partiel. Choisissez-en un et relancez pour obtenir "
+                        "de vraies recommandations."
+                    )
+            else:
+                fonction = {
+                    "Acteur": moteur.films_par_acteur,
+                    "Réalisateur": moteur.films_par_realisateur,
+                    "Compositeur": moteur.films_par_compositeur,
+                }[mode]
+                resultats = fonction(texte, n=nb, tri=tri if tri != "similar" else "votes")
+                entete = f"{len(resultats)} films avec « {texte} »"
+                aide = f"Filmographie filtrée sur le rôle : {mode.lower()}."
+
+        st.success(entete)
+        st.caption(aide)
+        st.write("")
+
+        for _, film in resultats.iterrows():
+            afficher_film(film)
+
+    except ValueError as erreur:
+        st.error(str(erreur))
+        st.caption(
+            "Vérifiez l'orthographe, ou essayez le titre en version originale — "
+            "le catalogue vient d'IMDb."
+        )
+
+else:
+    st.caption(
+        "Choisissez un mode, tapez une recherche, puis « Rechercher ». "
+        "Essayez « Inception », « Jean Dujardin » ou « Hans Zimmer »."
     )
+
+
+# --------------------------------------------------------------------------- #
+#  Pied de page
+# --------------------------------------------------------------------------- #
+
+st.markdown(
+    """
+<div class="cm-pied">
+  <b>Comment fonctionnent les recommandations.</b> Aucun spectateur n'a renseigné
+  ses préférences : c'est une situation de <i>cold start</i>. Chaque film est donc
+  représenté par son contenu — résumé (pondéré ×2), genres, équipe, titre en
+  bigrammes pour rattraper les sagas, et caractéristiques numériques (notes, votes,
+  année, durée, ×2). Les plus proches voisins au sens de la similarité cosinus
+  deviennent les recommandations. Le compositeur ne pèse que 0,15 : un même
+  compositeur signe des films trop différents pour être un bon signal de proximité.
+  <br><br>
+  Catalogue : 202 643 films IMDb enrichis des résumés et affiches TMDB, après
+  exclusion des séries, des contenus pour adultes, des émissions de plateau et des
+  œuvres de moins de 20 ou plus de 300 minutes.
+  <br><br>
+  Projet 2 du titre professionnel Data Analyst (RNCP 37429) — Wild Code School.
+</div>
+""",
+    unsafe_allow_html=True,
+)

@@ -1,165 +1,356 @@
 """
-Moteur de recommandation WildMovie.
+CinéMad — moteur de recommandation.
 
-Situation de cold start : aucun historique de préférences client n'existe.
-La recommandation repose donc uniquement sur les caractéristiques des films —
-ici, les personnes qui les ont faits (acteurs, réalisateurs, compositeurs),
-pondérées par rôle, plus un bonus de notoriété.
+Portage du moteur du Projet 2 (Wild Code School, RNCP 37429) vers une version
+déployable : mêmes caractéristiques, mêmes pondérations, mêmes modes de tri.
 
-Ce module ne dépend pas de Streamlit : il est testable seul.
+Trois choses ont changé par rapport au script d'origine :
+  1. le catalogue est chargé depuis des morceaux compressés (limite de taille
+     de fichier de GitHub) au lieu d'un CSV de 119 Mo ;
+  2. les identifiants de personnes sont déjà résolus en noms dans les données,
+     ce qui évite de charger un référentiel de 450 Mo au démarrage ;
+  3. `CountVectorizer(tokenizer=...)`, déprécié puis retiré de scikit-learn,
+     est remplacé par `analyzer=...`, qui fait la même chose sans avertissement.
 """
 
 from __future__ import annotations
 
-import numpy as np
+import glob
+import os
+
 import pandas as pd
-from scipy import sparse
-
-# Poids par rôle dans le calcul de similarité.
-# Le réalisateur pèse le plus : c'est lui qui porte l'univers d'un film.
-POIDS_ROLE = {"D_IDS": 3.0, "C_IDS": 1.6, "A_IDS": 1.0}
-
-# Prior bayésien pour la note : un film à 9/10 sur 600 votes ne vaut pas
-# un film à 9/10 sur 600 000 votes.
-VOTES_PRIOR = 5_000
+import streamlit as st
+from scipy.sparse import hstack
+from sklearn.feature_extraction.text import CountVectorizer, TfidfVectorizer
+from sklearn.neighbors import NearestNeighbors
 
 
-def charger_films(chemin: str) -> pd.DataFrame:
-    """Charge le catalogue et normalise les colonnes de listes."""
-    df = pd.read_csv(chemin, compression="gzip")
+RACINE = os.path.dirname(os.path.abspath(__file__))
+DOSSIER_DONNEES = os.path.join(RACINE, "data")
 
-    for col in ("ACTEURS", "REALISATEURS", "COMPOSITEURS", "A_IDS", "D_IDS", "C_IDS"):
-        df[col] = df[col].fillna("")
+# Les affiches TMDB partagent toutes le même préfixe : on ne stocke que le suffixe.
+PREFIXE_AFFICHE = "https://image.tmdb.org/t/p/w342/"
 
-    for col in ("NOTE_MOYENNE_IMDB", "NOTE_MOYENNE_TMDB", "MEILLEURE_NOTE"):
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    for col in ("NOMBRE_DE_VOTES_IMDB", "NOMBRE_DE_VOTES_TMDB"):
-        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype("int64")
+COLONNES_NUMERIQUES = [
+    "IMDB_RATING",
+    "TMDB_RATING",
+    "IMDB_VOTE_COUNT",
+    "TMDB_VOTE_COUNT",
+    "YEAR",
+    "DURATION_MINUTES",
+]
 
-    df["TITRE"] = df["TITRE"].fillna("Sans titre")
-    df["TITRE_VO"] = df["TITRE_VO"].fillna(df["TITRE"])
-    df["NOTE_BAYES"] = note_bayesienne(df)
-    df["RECHERCHE"] = (
-        df["TITRE"].str.lower() + " " + df["TITRE_VO"].str.lower()
-    ).str.strip()
+# Pondération des blocs de caractéristiques, reprise du moteur d'origine.
+POIDS = {
+    "genres": 1.0,
+    "resume": 2.0,
+    "numerique": 2.0,
+    "realisateur": 1.0,
+    "acteurs": 1.0,
+    "compositeur": 0.15,
+    "titre": 1.0,
+}
+
+
+def _par_barre(texte: str) -> list[str]:
+    """Découpe une chaîne « a|b|c » en jetons, en ignorant les vides."""
+    return [jeton for jeton in str(texte).split("|") if jeton]
+
+
+def _tranche(valeur, bornes, prefixe: str) -> str:
+    """Range une valeur numérique dans une tranche nommée."""
+    if pd.isna(valeur):
+        return f"{prefixe}_inconnu"
+    for borne in bornes:
+        if valeur < borne:
+            return f"{prefixe}_moins_{borne}"
+    return f"{prefixe}_plus_{bornes[-1]}"
+
+
+def jetons_numeriques(ligne) -> str:
+    """
+    Traduit les caractéristiques chiffrées en jetons comparables.
+
+    Pourquoi ne pas les utiliser telles quelles : mises à l'échelle entre 0 et 1,
+    l'année devient une valeur quasi identique pour tous les films (2001/2025 ≈
+    0,99). Sous une similarité cosinus, cette quasi-constante domine le calcul et
+    les plus proches voisins deviennent mécaniquement les films au vecteur le plus
+    pauvre — des œuvres confidentielles sans rapport avec la demande. Découpées en
+    tranches, les mêmes informations redeviennent discriminantes : deux films
+    partagent leur décennie, leur format et leur niveau de notoriété, ou ne les
+    partagent pas.
+    """
+    annee = ligne["YEAR"]
+    decennie = f"decennie_{int(annee) // 10 * 10}" if pd.notna(annee) and annee > 1800 else "decennie_inconnue"
+
+    votes = ligne["TOTAL_VOTES"]
+    if votes >= 500_000:
+        notoriete = "notoriete_mondiale"
+    elif votes >= 100_000:
+        notoriete = "notoriete_grand_public"
+    elif votes >= 10_000:
+        notoriete = "notoriete_connue"
+    elif votes >= 1_000:
+        notoriete = "notoriete_confidentielle"
+    else:
+        notoriete = "notoriete_rare"
+
+    return "|".join(
+        [
+            decennie,
+            notoriete,
+            _tranche(ligne["DURATION_MINUTES"], [60, 90, 120, 150], "duree"),
+            _tranche(ligne["BEST_RATING"], [5, 6, 7, 8], "note"),
+        ]
+    )
+
+
+# --------------------------------------------------------------------------- #
+#  Chargement
+# --------------------------------------------------------------------------- #
+
+@st.cache_data(show_spinner="Chargement du catalogue…")
+def charger_catalogue() -> pd.DataFrame:
+    # Le catalogue est découpé en morceaux pour tenir sous la limite de taille
+    # de fichier de GitHub. On les cherche dans data/ puis à la racine.
+    morceaux = sorted(
+        glob.glob(os.path.join(DOSSIER_DONNEES, "films_*.csv.gz"))
+        or glob.glob(os.path.join(RACINE, "films_*.csv.gz"))
+    )
+    if not morceaux:
+        raise FileNotFoundError(
+            f"Aucun fichier films_*.csv.gz dans {DOSSIER_DONNEES} ni dans {RACINE}."
+        )
+
+    df = pd.concat(
+        (pd.read_csv(m, dtype=str, compression="gzip") for m in morceaux),
+        ignore_index=True,
+    )
+    df.columns = df.columns.str.strip()
+
+    for colonne in ("SUMMARY", "GENRES", "TITLE_ORIGINAL", "TITLE_FR", "TITLE_EN",
+                    "POSTER_PATH", "ACTOR_NAME", "DIRECTOR_NAME", "COMPOSER_NAME"):
+        if colonne in df.columns:
+            df[colonne] = df[colonne].fillna("").astype(str)
+
+    for colonne in COLONNES_NUMERIQUES + ["BEST_RATING"]:
+        df[colonne] = pd.to_numeric(df[colonne], errors="coerce")
+
+    # TITLE_FR et TITLE_EN concatènent toutes les variantes régionales d'un même
+    # film (« Le chevalier noir|The Dark Knight : Le Chevalier noir »). Pour
+    # l'affichage on prend la première ; toutes servent à la recherche.
+    df["TITRE_AFFICHE"] = df["TITLE_FR"].str.split("|").str[0].str.strip()
+    df["TITRE_AFFICHE"] = df["TITRE_AFFICHE"].where(
+        df["TITRE_AFFICHE"] != "", df["TITLE_ORIGINAL"]
+    )
+
+    df["TOTAL_VOTES"] = (
+        df["IMDB_VOTE_COUNT"].fillna(0) + df["TMDB_VOTE_COUNT"].fillna(0)
+    ).astype("int64")
+    df["YEAR_NUM"] = df["YEAR"].fillna(0).astype("int64")
+    df["BEST_RATING"] = df["BEST_RATING"].fillna(0)
+
+    # Index de recherche : toutes les variantes de titre, en minuscules,
+    # encadrées de barres pour permettre une comparaison exacte par jeton.
+    colonnes_titres = [c for c in ("TITLE_ORIGINAL", "TITLE_FR", "TITLE_EN") if c in df.columns]
+    concat = df[colonnes_titres[0]].str.lower()
+    for colonne in colonnes_titres[1:]:
+        concat = concat + "|" + df[colonne].str.lower()
+    df["_TITRES"] = "|" + concat.str.replace(r"\|+", "|", regex=True).str.strip("|") + "|"
     return df
 
 
-def note_bayesienne(df: pd.DataFrame) -> pd.Series:
-    """Note lissée : tire la note vers la moyenne du catalogue quand les votes sont rares."""
-    notes = df["MEILLEURE_NOTE"].fillna(df["NOTE_MOYENNE_IMDB"])
-    votes = df["NOMBRE_DE_VOTES_IMDB"].astype(float)
-    moyenne_globale = float(np.nanmean(notes)) if len(notes) else 5.0
-    lissee = (votes * notes.fillna(moyenne_globale) + VOTES_PRIOR * moyenne_globale) / (
-        votes + VOTES_PRIOR
-    )
-    return lissee.round(2)
+def url_affiche(suffixe: str) -> str:
+    """Reconstruit l'URL complète d'une affiche TMDB, ou une chaîne vide."""
+    suffixe = str(suffixe).strip().lstrip("/")
+    return PREFIXE_AFFICHE + suffixe if suffixe else ""
 
 
-def construire_matrice(df: pd.DataFrame):
+# --------------------------------------------------------------------------- #
+#  Modèle
+# --------------------------------------------------------------------------- #
+
+@st.cache_resource(show_spinner="Construction du modèle de recommandation…")
+def construire_modele():
     """
-    Matrice creuse films × personnes, pondérée par rôle et normalisée L2.
+    Assemble les sept blocs de caractéristiques et entraîne le KNN cosinus.
 
-    Normaliser chaque ligne rend la similarité comparable entre un film à
-    trois intervenants connus et un film au générique fourni.
+    Le résumé pèse double parce que c'est lui qui porte le sujet du film ;
+    le compositeur pèse 0,15 parce qu'un même compositeur signe des films
+    très différents et rapprocherait à tort des œuvres sans rapport.
     """
-    vocabulaire: dict[str, int] = {}
-    lignes, colonnes, valeurs = [], [], []
+    df = charger_catalogue()
 
-    for i, row in enumerate(df.itertuples(index=False)):
-        vus: dict[int, float] = {}
-        for colonne, poids in POIDS_ROLE.items():
-            brut = getattr(row, colonne)
-            if not brut:
-                continue
-            for identifiant in brut.split("|"):
-                if not identifiant:
-                    continue
-                j = vocabulaire.setdefault(identifiant, len(vocabulaire))
-                # Une personne créditée deux fois ne compte qu'une, au poids le plus fort.
-                vus[j] = max(vus.get(j, 0.0), poids)
-        for j, v in vus.items():
-            lignes.append(i)
-            colonnes.append(j)
-            valeurs.append(v)
+    bloc_resume = TfidfVectorizer(stop_words="english").fit_transform(df["SUMMARY"])
+    bloc_genres = CountVectorizer(analyzer=_par_barre).fit_transform(df["GENRES"])
+    bloc_acteurs = CountVectorizer(analyzer=_par_barre).fit_transform(df["ACTOR_NAME"])
+    bloc_realisateur = CountVectorizer(analyzer=_par_barre).fit_transform(df["DIRECTOR_NAME"])
+    bloc_compositeur = CountVectorizer(analyzer=_par_barre).fit_transform(df["COMPOSER_NAME"])
 
-    matrice = sparse.csr_matrix(
-        (valeurs, (lignes, colonnes)),
-        shape=(len(df), max(len(vocabulaire), 1)),
-        dtype=np.float32,
+    # Bigrammes sur le titre : c'est ce qui rattrape les sagas
+    # (« Harry Potter and the… », « The Godfather Part… »).
+    bloc_titre = TfidfVectorizer(ngram_range=(1, 2)).fit_transform(df["TITLE_ORIGINAL"])
+
+    bloc_numerique = CountVectorizer(analyzer=_par_barre).fit_transform(
+        df.apply(jetons_numeriques, axis=1)
     )
 
-    normes = np.sqrt(matrice.multiply(matrice).sum(axis=1)).A.ravel()
-    normes[normes == 0] = 1.0
-    inverse = sparse.diags(1.0 / normes)
-    return inverse @ matrice, vocabulaire
+    combine = hstack(
+        [
+            bloc_genres * POIDS["genres"],
+            bloc_resume * POIDS["resume"],
+            bloc_numerique * POIDS["numerique"],
+            bloc_realisateur * POIDS["realisateur"],
+            bloc_acteurs * POIDS["acteurs"],
+            bloc_compositeur * POIDS["compositeur"],
+            bloc_titre * POIDS["titre"],
+        ]
+    ).tocsr()
+
+    knn = NearestNeighbors(metric="cosine", algorithm="brute")
+    knn.fit(combine)
+    return df, combine, knn
 
 
-def recommander(
-    df: pd.DataFrame,
-    matrice,
-    index_film: int,
-    nb: int = 12,
-    poids_notoriete: float = 0.25,
-    votes_min: int = 0,
+# --------------------------------------------------------------------------- #
+#  Tri
+# --------------------------------------------------------------------------- #
+
+CLES_DE_TRI = {
+    "recent": ["YEAR_NUM", "TOTAL_VOTES", "BEST_RATING"],
+    "rating": ["BEST_RATING", "TOTAL_VOTES", "YEAR_NUM"],
+    "votes": ["TOTAL_VOTES", "BEST_RATING", "YEAR_NUM"],
+}
+
+
+def trier(df: pd.DataFrame, tri: str = "recent") -> pd.DataFrame:
+    cles = CLES_DE_TRI.get(tri, CLES_DE_TRI["recent"])
+    return df.sort_values(cles, ascending=False, kind="mergesort")
+
+
+def trier_recommandations(df: pd.DataFrame, tri: str = "similar") -> pd.DataFrame:
+    """Comme `trier`, mais la similarité sert toujours de garde-fou."""
+    if tri == "similar":
+        cles = ["SIM", "TOTAL_VOTES", "YEAR_NUM"]
+    else:
+        cles = [CLES_DE_TRI.get(tri, CLES_DE_TRI["recent"])[0], "SIM", "TOTAL_VOTES"]
+    return df.sort_values(cles, ascending=False, kind="mergesort")
+
+
+# --------------------------------------------------------------------------- #
+#  Recherche par film
+# --------------------------------------------------------------------------- #
+
+def index_du_titre(df: pd.DataFrame, titre: str) -> int | None:
+    """
+    Index du film dont l'une des variantes de titre correspond exactement.
+
+    Plusieurs films partagent un même titre — « Les Évadés » désigne aussi bien
+    le film de 1994 qu'un documentaire confidentiel. On retient le plus voté :
+    c'est presque toujours celui que l'utilisateur avait en tête.
+    """
+    cible = str(titre).strip().lower()
+    if not cible:
+        return None
+
+    correspond = df["_TITRES"].str.contains(f"|{cible}|", regex=False, na=False)
+    if not correspond.any():
+        return None
+    return int(df.loc[correspond, "TOTAL_VOTES"].idxmax())
+
+
+def recommander_par_titre(
+    titre: str, n: int = 5, tri: str = "similar", votes_min: int = 1_000
 ) -> pd.DataFrame:
     """
-    Renvoie les films les plus proches du film choisi.
+    Films les plus proches du titre demandé.
 
-    Score = (1 - poids_notoriete) × similarité de générique
-          +      poids_notoriete  × note bayésienne normalisée
+    `votes_min` écarte du résultat les œuvres que presque personne n'a notées.
+    Sans ce garde-fou, des films au générique et au résumé très pauvres
+    remontent régulièrement : leur vecteur est si creux que la moindre
+    caractéristique partagée suffit à les rapprocher de n'importe quoi.
     """
-    similarites = (matrice @ matrice[index_film].T).toarray().ravel()
-    similarites[index_film] = -1.0  # ne jamais se recommander soi-même
+    df, combine, knn = construire_modele()
 
-    notes = df["NOTE_BAYES"].to_numpy(dtype=np.float32)
-    etendue = float(notes.max() - notes.min()) or 1.0
-    notes_norm = (notes - notes.min()) / etendue
+    index = index_du_titre(df, titre)
+    if index is None:
+        raise ValueError(f"Film « {titre} » introuvable.")
 
-    score = (1.0 - poids_notoriete) * similarites + poids_notoriete * notes_norm
-    score[similarites <= 0] = -1.0  # aucun intervenant en commun → hors sujet
+    # Vivier large : il faut de la marge pour filtrer puis trier sans
+    # perdre les suites d'une saga, qui ne sont pas toujours les plus proches.
+    vivier = min(max(400, n * 20), len(df) - 1)
+    distances, indices = knn.kneighbors(combine[index], n_neighbors=vivier + 1)
 
-    if votes_min > 0:
-        score[df["NOMBRE_DE_VOTES_IMDB"].to_numpy() < votes_min] = -1.0
+    recos = df.loc[indices[0][1:]].copy()
+    recos["SIM"] = 1.0 - distances[0][1:]
 
-    nb_valides = int((score > -1.0).sum())
-    if nb_valides == 0:
-        return df.head(0).assign(SCORE=[], SIMILARITE=[])
-
-    k = min(nb, nb_valides)
-    candidats = np.argpartition(-score, k - 1)[:k]
-    candidats = candidats[np.argsort(-score[candidats])]
-
-    resultat = df.iloc[candidats].copy()
-    resultat["SCORE"] = np.round(score[candidats] * 100, 1)
-    resultat["SIMILARITE"] = np.round(similarites[candidats] * 100, 1)
-    return resultat
+    retenus = recos[recos["TOTAL_VOTES"] >= votes_min]
+    if len(retenus) < n:          # seuil trop strict : on rend ce qu'on a
+        retenus = recos
+    return trier_recommandations(retenus, tri).head(n)
 
 
-def intervenants_communs(df: pd.DataFrame, i: int, j: int) -> list[str]:
-    """Noms partagés par deux films — sert à expliquer une recommandation."""
-    def personnes(k: int) -> dict[str, str]:
-        paires: dict[str, str] = {}
-        for col_id, col_nom in (
-            ("D_IDS", "REALISATEURS"),
-            ("C_IDS", "COMPOSITEURS"),
-            ("A_IDS", "ACTEURS"),
-        ):
-            ids = [x for x in str(df.iloc[k][col_id]).split("|") if x]
-            noms = [x for x in str(df.iloc[k][col_nom]).split("|") if x]
-            paires.update(dict(zip(ids, noms)))
-        return paires
+def chercher_saga(requete: str, n: int = 20) -> pd.DataFrame:
+    """
+    Recherche par titre partiel — le filet de sécurité quand le titre exact
+    n'existe pas (« Harry Potter », « Star Wars »). N'utilise pas le modèle.
+    """
+    df = charger_catalogue()
+    cible = str(requete).strip()
+    if not cible:
+        raise ValueError("Entrez un texte.")
 
-    a, b = personnes(i), personnes(j)
-    return [a[k] for k in a.keys() & b.keys()]
+    trouves = df[df["_TITRES"].str.contains(cible.lower(), regex=False, na=False)].copy()
+    if trouves.empty:
+        raise ValueError(f"Aucun film ne contient « {requete} » dans le titre.")
+
+    # Les documentaires polluent ce genre de recherche.
+    trouves = trouves[~trouves["GENRES"].str.contains("documentary", case=False, na=False)]
+    if trouves.empty:
+        raise ValueError(f"Aucun film de fiction ne contient « {requete} » dans le titre.")
+
+    return trier(trouves, "votes").head(n)
 
 
-def chercher(df: pd.DataFrame, requete: str, limite: int = 40) -> pd.DataFrame:
-    """Recherche par titre, français ou version originale."""
-    requete = (requete or "").strip().lower()
-    if not requete:
-        return df.head(0)
-    masque = df["RECHERCHE"].str.contains(requete, regex=False, na=False)
-    trouves = df[masque]
-    exact = trouves["TITRE"].str.lower() == requete
-    return pd.concat([trouves[exact], trouves[~exact]]).head(limite)
+# --------------------------------------------------------------------------- #
+#  Recherche par personne
+# --------------------------------------------------------------------------- #
+
+def films_par_personne(requete: str, colonne: str, n: int = 5, tri: str = "recent") -> pd.DataFrame:
+    df = charger_catalogue()
+    cible = str(requete).strip()
+    if not cible:
+        raise ValueError("Entrez un nom.")
+
+    correspond = df[colonne].str.contains(cible, case=False, na=False, regex=False)
+    if not correspond.any():
+        raise ValueError(f"« {requete} » est introuvable dans la base.")
+
+    return trier(df[correspond].copy(), tri).head(n)
+
+
+def films_par_acteur(nom, n=5, tri="recent"):
+    return films_par_personne(nom, "ACTOR_NAME", n, tri)
+
+
+def films_par_realisateur(nom, n=5, tri="recent"):
+    return films_par_personne(nom, "DIRECTOR_NAME", n, tri)
+
+
+def films_par_compositeur(nom, n=5, tri="recent"):
+    return films_par_personne(nom, "COMPOSER_NAME", n, tri)
+
+
+# --------------------------------------------------------------------------- #
+#  Suggestions de saisie
+# --------------------------------------------------------------------------- #
+
+def suggerer(requete: str, colonne: str = "_TITRES", limite: int = 8) -> list[str]:
+    """Propositions de titres pendant la frappe, les plus populaires d'abord."""
+    df = charger_catalogue()
+    cible = str(requete).strip().lower()
+    if len(cible) < 2:
+        return []
+    trouves = df[df[colonne].str.contains(cible, regex=False, na=False)]
+    trouves = trouves.nlargest(limite, "TOTAL_VOTES")
+    return trouves["TITLE_ORIGINAL"].tolist()
